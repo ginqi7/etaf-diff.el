@@ -52,8 +52,8 @@ to this program."
   "Node.js program that runs `etaf-diff-highlight.js'."
   :type 'string)
 
-(defcustom etaf-diff-style 'line
-  "Default style of `etaf-diff-files'.
+(defcustom etaf-diff-style 'side
+  "Style of the diff shown by the commands that do not take one.
 `line' shows one column; `side' shows old and new in two columns."
   :type '(choice (const :tag "Line" line)
                  (const :tag "Side by side" side)))
@@ -254,12 +254,8 @@ STYLE is `line' (the default) or `side'.  Press q to close the buffer."
   "Show the diff from file OLD to file NEW in an ETAF buffer.
 STYLE is `line' or `side'; it defaults to `etaf-diff-style'."
   (interactive
-   (let ((old (read-file-name "Old file: " nil nil t))
-         (new (read-file-name "New file: " nil nil t))
-         (style (intern (completing-read
-                         "Style: " '("line" "side") nil t nil nil
-                         (symbol-name etaf-diff-style)))))
-     (list old new style)))
+   (list (read-file-name "Old file: " nil nil t)
+         (read-file-name "New file: " nil nil t)))
   (etaf-diff--show old new (etaf-diff-parse (etaf-diff-json old new)) style))
 
 ;;;###autoload
@@ -268,14 +264,10 @@ STYLE is `line' or `side'; it defaults to `etaf-diff-style'."
 STYLE is `line' or `side'; it defaults to `etaf-diff-style'.  The diff has no
 source files, so visiting a line does nothing."
   (interactive
-   (let ((file (read-file-name "Diff file: " nil nil t nil
-                               (lambda (name)
-                                 (or (file-directory-p name)
-                                     (string-suffix-p ".diff" name)))))
-         (style (intern (completing-read
-                         "Style: " '("line" "side") nil t nil nil
-                         (symbol-name etaf-diff-style)))))
-     (list file style)))
+   (list (read-file-name "Diff file: " nil nil t nil
+                         (lambda (name)
+                           (or (file-directory-p name)
+                               (string-suffix-p ".diff" name))))))
   (let ((json (with-temp-buffer
                 (insert-file-contents file)
                 (etaf-diff--highlight))))
@@ -286,34 +278,38 @@ source files, so visiting a line does nothing."
   "Show the output of `git diff' with ARGS in an ETAF buffer.
 ARGS is a string of git diff arguments, such as \"--cached\" or \"HEAD~1\".
 It is run in `default-directory'.  STYLE is `line' or `side'; it defaults to
-`etaf-diff-style'.  The diff has no source files, so visiting a line does
-nothing."
+`etaf-diff-style'.  Visiting a line of the new side opens the working tree
+file; the old side has no source."
   (interactive
-   (let ((args (read-string "git diff args: "))
-         (style (intern (completing-read
-                         "Style: " '("line" "side") nil t nil nil
-                         (symbol-name etaf-diff-style)))))
-     (list args style)))
+   (list (read-string "git diff args: ")))
   (let ((json (with-temp-buffer
                 (let ((status (apply #'call-process etaf-diff-git-program nil t nil
                                      "--no-pager" "diff" "--no-color" "--no-ext-diff"
                                      (split-string-and-unquote args))))
                   (unless (eq status 0)
                     (error "git diff failed: %s" (buffer-string))))
-                (etaf-diff--highlight))))
-    (etaf-diff--show nil nil (etaf-diff-parse json) style)))
+                (etaf-diff--highlight)))
+        (root (with-temp-buffer
+                (unless (eq 0 (call-process etaf-diff-git-program nil t nil
+                                            "rev-parse" "--show-toplevel"))
+                  (error "Not in a git repository: %s" (buffer-string)))
+                (string-trim (buffer-string)))))
+    (etaf-diff--show nil nil (etaf-diff-parse json) style root)))
 
-(defun etaf-diff--show (old new files style)
+(defun etaf-diff--show (old new files style &optional root)
   "Show the parsed diff FILES of OLD and NEW in STYLE in the diff buffer.
-OLD and NEW are nil for a diff read from a .diff file.  The paths, files and
-style are kept as the application state, so a style switch can redraw the
-same diff and a jump can open the source files."
-  (etaf-app-open etaf-diff-buffer-name
-                 (etaf-diff-view files style)
-                 :state (list :old (and old (expand-file-name old))
-                              :new (and new (expand-file-name new))
-                              :files files
-                              :style style)))
+STYLE defaults to `etaf-diff-style'.  OLD and NEW are nil for a diff read
+from a .diff file.  ROOT is the git repository root of a git diff.  The
+paths, files and style are kept as the application state, so a style switch
+can redraw the same diff and a jump can open the source files."
+  (let ((style (or style etaf-diff-style)))
+    (etaf-app-open etaf-diff-buffer-name
+                   (etaf-diff-view files style)
+                   :state (list :old (and old (expand-file-name old))
+                                :new (and new (expand-file-name new))
+                                :root root
+                                :files files
+                                :style style))))
 
 (defun etaf-diff--state ()
   "Return the state of the current diff buffer."
@@ -327,7 +323,8 @@ same diff and a jump can open the source files."
   (let ((state (etaf-diff--state)))
     (etaf-diff--show (plist-get state :old) (plist-get state :new)
                      (plist-get state :files)
-                     (if (eq (plist-get state :style) 'side) 'line 'side))))
+                     (if (eq (plist-get state :style) 'side) 'line 'side)
+                     (plist-get state :root))))
 
 (defun etaf-diff--anchors (files style)
   "Return one anchor plist per buffer line of the diff shown in STYLE.
@@ -340,7 +337,8 @@ matches the rows of `etaf-diff-view'."
       (push nil anchors)                ; file title
       (dolist (block (plist-get file :blocks))
         (push (list :old (plist-get block :oldStartLine)
-                    :new (plist-get block :newStartLine))
+                    :new (plist-get block :newStartLine)
+                    :name (etaf-diff--file-name (plist-get file :newName)))
               anchors)
         (dolist (entry (if (eq style 'side)
                            (etaf-diff--side-rows (plist-get block :lines))
@@ -348,6 +346,7 @@ matches the rows of `etaf-diff-view'."
                                  (plist-get block :lines))))
           (push (list :old (and (car entry) (plist-get (car entry) :oldNumber))
                       :new (and (cdr entry) (plist-get (cdr entry) :newNumber))
+                      :name (etaf-diff--file-name (plist-get file :newName))
                       :changed (or (equal (plist-get (car entry) :type) "delete")
                                    (equal (plist-get (cdr entry) :type) "insert")))
                 anchors))))
@@ -415,13 +414,24 @@ The header of the current line is skipped in both directions."
 SIDE-LEFT, non-nil in side style, prefers the old file; otherwise the new
 file is preferred.  The other side is used when the preferred one is
 empty.  Return nil when ANCHOR has no source line or the diff has no source
-file for it, as with a .diff file."
+file for it, as with a .diff file.
+A git diff has a :root in the state; its new side is the working tree file
+named by the anchor's :name under that root, and its old side is not
+supported.  A deleted file has no working tree file, so it has no target."
   (let* ((state (etaf-diff--state))
+         (root (plist-get state :root))
+         (name (plist-get anchor :name))
+         (file (lambda (key)
+                 (if (and root name)
+                     (and (eq key :new)
+                          (let ((path (expand-file-name name root)))
+                            (and (file-regular-p path) path)))
+                   (plist-get state key))))
          (key (cl-find-if (lambda (k) (and (plist-get anchor k)
-                                           (plist-get state k)))
+                                           (funcall file k)))
                           (if side-left '(:old :new) '(:new :old)))))
     (when key
-      (cons (plist-get state key)
+      (cons (funcall file key)
             (plist-get anchor key)))))
 
 ;;;###autoload
