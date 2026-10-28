@@ -1,0 +1,28 @@
+--- python1.py	2026-10-28 14:35:14
++++ python2.py	2026-10-28 14:35:53
+@@ -1,14 +1,19 @@
+-# file_a.py
++# file_b.py
+ def calculate_sum(a, b):
+-    # 计算两个数字的和
+-    result = a + b
+-    return result
++    # 使用更简化的方式计算和
++    return a + b
+ 
+ 
+ def greet(name):
+-    print("Hello, " + name)
++    print(f"Hello, {name}!")
+ 
+ 
++def multiply(a, b):
++    # 新增的乘法函数
++    return a * b
++
++
+ if __name__ == "__main__":
+     print(calculate_sum(3, 5))
+-    greet("Alice")
++    print(multiply(2, 4))
++    greet("Bob")
