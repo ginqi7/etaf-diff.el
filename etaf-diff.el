@@ -23,11 +23,15 @@
 ;;   `etaf-diff-files'     Show the diff of two file names in STYLE.
 ;;   `etaf-diff-open'      Show the unified diff in a .diff FILE in STYLE.
 ;;   `etaf-diff-git'       Show the output of `git diff' with ARGS in STYLE.
+;;   `etaf-diff-git-dispatch'
+;;                         Pick the `git diff' arguments in a transient and
+;;                         show the diff with `etaf-diff-git'.
 ;;   `etaf-diff-json'     Return the diff as a diff2html JSON string.
 
 ;;; Code:
 
 (require 'json)
+(require 'transient)
 (require 'etaf)
 
 (defgroup etaf-diff nil
@@ -295,6 +299,128 @@ file; the old side has no source."
                   (error "Not in a git repository: %s" (buffer-string)))
                 (string-trim (buffer-string)))))
     (etaf-diff--show nil nil (etaf-diff-parse json) style root)))
+
+;;; Git diff transient
+
+(defun etaf-diff--git-root ()
+  "Return the root directory of the current Git repository, or nil."
+  (with-temp-buffer
+    (when (eq 0 (call-process etaf-diff-git-program nil t nil
+                              "rev-parse" "--show-toplevel"))
+      (string-trim (buffer-string)))))
+
+(defun etaf-diff--git-refs ()
+  "Return the refs of the current Git repository, most recent first."
+  (cons "HEAD"
+        (with-temp-buffer
+          (when (eq 0 (call-process etaf-diff-git-program nil t nil
+                                    "for-each-ref" "--format=%(refname:short)"
+                                    "--sort=-committerdate"))
+            (split-string (buffer-string) "\n" t)))))
+
+(defun etaf-diff--git-read-ref (prompt &optional default)
+  "Read a Git ref with PROMPT, defaulting to DEFAULT."
+  (completing-read prompt (etaf-diff--git-refs) nil nil nil nil default))
+
+(defun etaf-diff--git-relative (file)
+  "Return FILE relative to `default-directory', for use as a Git pathspec."
+  (file-relative-name (expand-file-name file) default-directory))
+
+(defun etaf-diff--git-transient-args (revisions &optional paths)
+  "Return a `git diff' argument string.
+The switches chosen in `etaf-diff-git-dispatch' come first, then REVISIONS,
+and then PATHS after a \"--\" separator when PATHS is non-nil."
+  (combine-and-quote-strings
+   (append (transient-args 'etaf-diff-git-dispatch)
+           revisions
+           (when paths (cons "--" paths)))))
+
+(transient-define-argument etaf-diff--context-lines ()
+  "Number of context lines."
+  :description "Context lines"
+  :class 'transient-option
+  :shortarg "-U"
+  :argument "-U"
+  :reader 'transient-read-number-N0)
+
+(transient-define-argument etaf-diff--algorithm ()
+  "Diff algorithm."
+  :description "Algorithm"
+  :class 'transient-option
+  :shortarg "-A"
+  :argument "--diff-algorithm="
+  :choices '("myers" "minimal" "patience" "histogram"))
+
+(transient-define-suffix etaf-diff-git-working-tree ()
+  "Show the unstaged changes of the working tree."
+  :description "Working tree"
+  (interactive)
+  (etaf-diff-git (etaf-diff--git-transient-args nil)))
+
+(transient-define-suffix etaf-diff-git-staged ()
+  "Show the staged changes of the working tree."
+  :description "Staged (--cached)"
+  (interactive)
+  (etaf-diff-git (etaf-diff--git-transient-args '("--cached"))))
+
+(transient-define-suffix etaf-diff-git-last-commit ()
+  "Show the changes of the last commit."
+  :description "Last commit"
+  (interactive)
+  (etaf-diff-git (etaf-diff--git-transient-args '("HEAD^" "HEAD"))))
+
+(transient-define-suffix etaf-diff-git-range (rev-a rev-b)
+  "Show the changes between REV-A and REV-B."
+  :description "Range..."
+  (interactive (list (etaf-diff--git-read-ref "From rev: " "HEAD^")
+                     (etaf-diff--git-read-ref "To rev: " "HEAD")))
+  (etaf-diff-git (etaf-diff--git-transient-args (list rev-a rev-b))))
+
+(transient-define-suffix etaf-diff-git-against-branch (branch)
+  "Show the changes of the working tree against BRANCH."
+  :description "Against branch..."
+  (interactive (list (etaf-diff--git-read-ref "Against branch: " "HEAD")))
+  (etaf-diff-git (etaf-diff--git-transient-args (list branch))))
+
+(transient-define-suffix etaf-diff-git-current-file ()
+  "Show the changes of the file visited by the current buffer."
+  :description "Current file"
+  (interactive)
+  (if-let* ((file (buffer-file-name))
+            ((etaf-diff--git-root)))
+      (etaf-diff-git
+       (etaf-diff--git-transient-args nil (list (etaf-diff--git-relative file))))
+    (user-error "Current buffer is not visiting a file of a Git repository")))
+
+(transient-define-suffix etaf-diff-git-file (file)
+  "Show the changes of FILE."
+  :description "File..."
+  (interactive (list (read-file-name "File: " nil buffer-file-name t)))
+  (etaf-diff-git
+   (etaf-diff--git-transient-args nil (list (etaf-diff--git-relative file)))))
+
+;;;###autoload
+(transient-define-prefix etaf-diff-git-dispatch ()
+  "Pick the arguments of `git diff' and show the diff in an ETAF buffer.
+The switches and options chosen here are passed to `etaf-diff-git'.  The
+result is shown in `etaf-diff-style'; press s in the diff buffer to toggle
+between the line and the side-by-side style."
+  ["Switches"
+   ("-w" "Ignore all space" "--ignore-all-space")
+   ("-b" "Ignore space change" "--ignore-space-change")
+   ("-B" "Ignore blank lines" "--ignore-blank-lines")
+   ("-W" "Function context" "--function-context")
+   ("-R" "Reverse" "-R")
+   ("-U" "Context lines" etaf-diff--context-lines)
+   ("-A" "Algorithm" etaf-diff--algorithm)]
+  ["Diff"
+   ("d" "Working tree" etaf-diff-git-working-tree)
+   ("s" "Staged" etaf-diff-git-staged)
+   ("h" "Last commit" etaf-diff-git-last-commit)
+   ("r" "Range..." etaf-diff-git-range)
+   ("b" "Against branch..." etaf-diff-git-against-branch)
+   ("f" "Current file" etaf-diff-git-current-file)
+   ("p" "File..." etaf-diff-git-file)])
 
 (defun etaf-diff--show (old new files style &optional root)
   "Show the parsed diff FILES of OLD and NEW in STYLE in the diff buffer.
